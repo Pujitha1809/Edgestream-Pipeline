@@ -41,7 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 BASE_DIR = Path(__file__).resolve().parent
-
+SIMULATOR_PATH = BASE_DIR.parent / "embedded" / "sensor_simulator"
 DASHBOARD_DIR = BASE_DIR.parent / "dashboard"
 DB_PATH = BASE_DIR / "readings.db"
 
@@ -202,10 +202,11 @@ async def lifespan(app: FastAPI):
     db_conn = init_db()
 
     if not SIMULATOR_PATH.exists():
-        print(f"ERROR: simulator python script not found at {SIMULATOR_PATH}", file=sys.stderr)
+        print(f"ERROR: simulator binary not found at {SIMULATOR_PATH}", file=sys.stderr)
+        print("Build it first: cd embedded && g++ -O2 -std=c++17 sensor_simulator.cpp -o sensor_simulator", file=sys.stderr)
     else:
         simulator_process = subprocess.Popen(
-            [sys.executable, str(SIMULATOR_PATH), "3", "800"],  # 3 sensors, 800ms interval
+            [str(SIMULATOR_PATH), "3", "800"],  # 3 sensors, 800ms interval
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
