@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>EdgeStream Pipeline Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #131a22;
+    --border: #1f2b38;
+    --text: #e6edf3;
+    --muted: #7d8b99;
+    --accent: #4fd1c5;
+    --accent2: #f6ad55;
+    --danger: #f56565;
+    --good: #48bb78;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .status-row { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .status-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 6px 14px; font-size: 13px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--good); box-shadow: 0 0 8px var(--good); animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .card h3 { margin: 0 0 12px; font-size: 13px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat-value { font-size: 28px; font-weight: 700; }
+  .stat-value.temp { color: var(--accent2); }
+  .stat-value.hum { color: var(--accent); }
+  .chart-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .chart-panel canvas { max-height: 280px; }
+  .log { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; max-height: 220px; overflow-y: auto; font-family: "SF Mono", Consolas, monospace; font-size: 12px; }
+  .log-line { padding: 3px 0; color: var(--muted); border-bottom: 1px solid #1a232c; }
+  .log-line.rejected { color: var(--danger); }
+  .footer-note { color: var(--muted); font-size: 11px; margin-top: 24px; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <h1>EdgeStream Pipeline</h1>
+  <div class="subtitle">Embedded (simulated) → Ingestion & Validation → Live Visualization</div>
+
+  <div class="status-row">
+    <div class="status-pill"><span class="dot" id="connDot"></span><span id="connText">Connecting…</span></div>
+    <div class="status-pill">Accepted: <strong id="acceptedCount" style="margin-left:6px">0</strong></div>
+    <div class="status-pill">Rejected: <strong id="rejectedCount" style="margin-left:6px">0</strong></div>
+  </div>
+
+  <div class="grid" id="sensorCards"></div>
+
+  <div class="chart-panel">
+    <h3 style="color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:0.04em; margin:0 0 12px;">Temperature (°C) — live</h3>
+    <canvas id="tempChart"></canvas>
+  </div>
+
+  <div class="chart-panel">
+    <h3 style="color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:0.04em; margin:0 0 12px;">Humidity (%) — live</h3>
+    <canvas id="humChart"></canvas>
+  </div>
+
+  <div class="log" id="eventLog"></div>
+
+  <div class="footer-note">
+    Data source: simulated embedded sensor nodes (C++, mirrors ESP32 + DHT22 firmware behavior) →
+    FastAPI ingestion service (validation + SQLite persistence) → WebSocket live feed.
+  </div>
+
+<script>
+// Dynamic WS URL: works both when opened locally (index.html pointing at
+// localhost:8000) and when deployed, where the dashboard is served by the
+// same FastAPI app that exposes /ws (so we just reuse the current host).
+const WS_URL = (() => {
+  const isFileOrLocalOpen = window.location.protocol === "file:";
+  if (isFileOrLocalOpen) return "ws://localhost:8000/ws";
+  const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${window.location.host}/ws`;
+})();
+const MAX_POINTS = 40;
+const sensorSeries = {}; // sensor_id -> { temp: [], hum: [], labels: [] }
+let acceptedCount = 0, rejectedCount = 0;
+
+const palette = ["#4fd1c5", "#f6ad55", "#fc8181", "#63b3ed", "#b794f4"];
+
+const tempCtx = document.getElementById('tempChart').getContext('2d');
+const humCtx = document.getElementById('humChart').getContext('2d');
+
+const tempChart = new Chart(tempCtx, {
+  type: 'line',
+  data: { labels: [], datasets: [] },
+  options: chartOptions(-10, 55)
+});
+const humChart = new Chart(humCtx, {
+  type: 'line',
+  data: { labels: [], datasets: [] },
+  options: chartOptions(0, 100)
+});
+
+function chartOptions(min, max) {
+  return {
+    responsive: true,
+    animation: false,
+    scales: {
+      x: { ticks: { color: '#7d8b99', maxTicksLimit: 8 }, grid: { color: '#1f2b38' } },
+      y: { min, max, ticks: { color: '#7d8b99' }, grid: { color: '#1f2b38' } }
+    },
+    plugins: { legend: { labels: { color: '#e6edf3' } } }
+  };
+}
+
+function ensureSensor(id) {
+  if (sensorSeries[id]) return;
+  const color = palette[id % palette.length];
+  sensorSeries[id] = { temp: [], hum: [] };
+
+  tempChart.data.datasets.push({ label: `Sensor ${id}`, data: [], borderColor: color, backgroundColor: color, tension: 0.3, pointRadius: 0 });
+  humChart.data.datasets.push({ label: `Sensor ${id}`, data: [], borderColor: color, backgroundColor: color, tension: 0.3, pointRadius: 0 });
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = `card-${id}`;
+  card.innerHTML = `
+    <h3>Sensor ${id}</h3>
+    <div class="stat-value temp" id="temp-${id}">--°C</div>
+    <div class="stat-value hum" id="hum-${id}" style="font-size:16px; margin-top:6px;">-- % humidity</div>
+  `;
+  document.getElementById('sensorCards').appendChild(card);
+}
+
+function pushPoint(id, temp, hum, label) {
+  ensureSensor(id);
+  const idx = Object.keys(sensorSeries).indexOf(String(id));
+
+  tempChart.data.labels = tempChart.data.labels.length > MAX_POINTS ? tempChart.data.labels.slice(-MAX_POINTS) : tempChart.data.labels;
+  if (idx === 0) {
+    tempChart.data.labels.push(label);
+    humChart.data.labels.push(label);
+    if (tempChart.data.labels.length > MAX_POINTS) {
+      tempChart.data.labels.shift();
+      humChart.data.labels.shift();
+    }
+  }
+
+  const tds = tempChart.data.datasets[idx];
+  const hds = humChart.data.datasets[idx];
+  tds.data.push(temp);
+  hds.data.push(hum);
+  if (tds.data.length > MAX_POINTS) tds.data.shift();
+  if (hds.data.length > MAX_POINTS) hds.data.shift();
+
+  document.getElementById(`temp-${id}`).textContent = `${temp.toFixed(1)}°C`;
+  document.getElementById(`hum-${id}`).textContent = `${hum.toFixed(1)} % humidity`;
+
+  tempChart.update('none');
+  humChart.update('none');
+}
+
+function logLine(text, isRejected) {
+  const log = document.getElementById('eventLog');
+  const line = document.createElement('div');
+  line.className = 'log-line' + (isRejected ? ' rejected' : '');
+  line.textContent = text;
+  log.prepend(line);
+  while (log.children.length > 60) log.removeChild(log.lastChild);
+}
+
+function connect() {
+  const ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    document.getElementById('connDot').classList.add('live');
+    document.getElementById('connText').textContent = 'Live';
+  };
+  ws.onclose = () => {
+    document.getElementById('connDot').classList.remove('live');
+    document.getElementById('connText').textContent = 'Disconnected — retrying…';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'reading') {
+      const d = msg.data;
+      const label = new Date(d.timestamp).toLocaleTimeString();
+      pushPoint(d.sensor_id, d.temperature_c, d.humidity_pct, label);
+      acceptedCount++;
+      document.getElementById('acceptedCount').textContent = acceptedCount;
+      logLine(`✓ sensor ${d.sensor_id}  ${d.temperature_c.toFixed(1)}°C  ${d.humidity_pct.toFixed(1)}%  ${label}`, false);
+    } else if (msg.type === 'rejected') {
+      rejectedCount++;
+      document.getElementById('rejectedCount').textContent = rejectedCount;
+      logLine(`✗ rejected: ${msg.reason}`, true);
+    }
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
