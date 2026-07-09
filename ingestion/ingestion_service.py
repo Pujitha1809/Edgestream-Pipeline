@@ -41,7 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 BASE_DIR = Path(__file__).resolve().parent
-SIMULATOR_PATH = BASE_DIR.parent / "embedded" / "sensor_simulator.py"
+
 DASHBOARD_DIR = BASE_DIR.parent / "dashboard"
 DB_PATH = BASE_DIR / "readings.db"
 
